@@ -4,6 +4,8 @@ import { AbstractBitcoinApi } from './bitcoin-api-abstract-factory';
 import { IEsploraApi } from './esplora-api.interface';
 import { IElectrumApi } from './electrum-api.interface';
 import BitcoinApi from './bitcoin-api';
+import { IBitcoinApi } from './bitcoin-api.interface';
+import mempool from '../mempool';
 import logger from '../../logger';
 import crypto from 'crypto-js';
 import loadingIndicators from '../loading-indicators';
@@ -230,6 +232,57 @@ class BitcoindElectrsApi extends BitcoinApi implements AbstractBitcoinApi {
 
   private $getScriptHashUnspent(scriptHash: string): Promise<IElectrumApi.ScriptHashUtxos[]> {
     return this.electrumClient.blockchainScripthash_listunspent(scriptHash);
+  }
+
+  /**
+   * Fetch a confirmed transaction from the Electrum server rather than from Core.
+   *
+   * This is the whole reason this fork exists. Upstream inherits
+   * BitcoinApi.$getRawTransaction, which calls `getrawtransaction txid true`
+   * with no blockhash, and Core can only answer that from its mempool or with
+   * `txindex`. `txindex` is incompatible with pruning ("Prune mode is
+   * incompatible with -txindex"), so upstream Mempool cannot run against a
+   * pruned node at all. Electrum servers keep their own txid index, which is
+   * exactly the thing `txindex` would have provided.
+   *
+   * Nothing is reconstructed here. `blockchain.transaction.get(txid, true)`
+   * returns Core's verbose object verbatim, because the server passes the
+   * request through and hands back the JSON as-is, so it is already the
+   * IBitcoinApi.Transaction shape $convertTransaction consumes. Note that on a
+   * pruned node the server needs a proxy that can serve `getrawtransaction`
+   * with a blockhash; btc-rpc-proxy does since v0.7.
+   *
+   * Unconfirmed transactions keep the inherited path: they are in the node's
+   * own mempool, so Core answers without txindex and without a blockhash, and
+   * that path already has the fee data cached.
+   *
+   * Falls back to Core on any Electrum failure, so one build serves both a
+   * pruned node and an archival one with txindex.
+   */
+  /** @asyncUnsafe */
+  async $getRawTransaction(txId: string, skipConversion = false, addPrevout = false, lazyPrevouts = false): Promise<IEsploraApi.Transaction> {
+    if (mempool.getMempool()[txId]) {
+      return super.$getRawTransaction(txId, skipConversion, addPrevout, lazyPrevouts);
+    }
+
+    let transaction: IBitcoinApi.Transaction;
+    try {
+      transaction = await this.electrumClient.blockchainTransaction_get(txId, true);
+    } catch (e) {
+      logger.debug(`Electrum could not serve ${txId}, falling back to Core: ` + (e instanceof Error ? e.message : e));
+      return super.$getRawTransaction(txId, skipConversion, addPrevout, lazyPrevouts);
+    }
+    if (!transaction || !transaction.txid) {
+      return super.$getRawTransaction(txId, skipConversion, addPrevout, lazyPrevouts);
+    }
+
+    if (skipConversion) {
+      transaction.vout.forEach((vout) => {
+        vout.value = Math.round(vout.value * 100000000);
+      });
+      return transaction as any as IEsploraApi.Transaction;
+    }
+    return this.$convertTransaction(transaction, addPrevout, lazyPrevouts);
   }
 
   /** @asyncUnsafe */
