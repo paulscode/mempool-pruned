@@ -1,0 +1,102 @@
+# Build and publish this fork's backend and frontend images to ghcr.io.
+#
+# Upstream's own docker.yml builds the same two images and pushes them to Docker
+# Hub as mempool/backend and mempool/frontend. That workflow is left untouched:
+# it runs on `mempool-ci`, a self-hosted runner this fork does not have, so it
+# never fires here. This one runs on GitHub's hosted runners and pushes to the
+# registry attached to this account, so no new credentials are involved.
+#
+# The Dockerfiles are upstream's, unmodified. `docker/init.sh` is what puts them
+# in place and fetches the GeoIP data the backend image expects, which is why it
+# runs before either build rather than being folded into a Dockerfile.
+#
+# The backend build needs two named contexts, `rustgbt` and `backend`, because
+# upstream's backend Dockerfile reads the Rust GBT sources from a sibling
+# directory. Building ./backend/ without them fails on the COPY --from lines.
+name: Publish pruned images
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to publish the images under, for example v3.3.1-pruned.1'
+        required: true
+        type: string
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - frontend
+          - backend
+    name: Build and push ${{ matrix.service }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Work out the tag and commit
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "TAG=${{ inputs.tag }}" >> $GITHUB_ENV
+          else
+            echo "TAG=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
+          fi
+          echo "SHORT_SHA=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+
+      - name: Prepare the tree the way upstream's build expects
+        run: docker/init.sh "$TAG"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: linux/amd64,linux/arm64
+
+      - name: Set up Docker buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          platforms: linux/amd64,linux/arm64
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Cache Docker layers
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-${{ matrix.service }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-${{ matrix.service }}-
+
+      # Only the backend takes the extra contexts; passing them to the frontend
+      # build would be harmless but misleading about what it reads.
+      - name: Build and push ${{ matrix.service }}
+        run: |
+          EXTRA=""
+          if [ "${{ matrix.service }}" = "backend" ]; then
+            EXTRA="--build-context rustgbt=./rust --build-context backend=./backend"
+          fi
+          docker buildx build \
+            --cache-from "type=local,src=/tmp/.buildx-cache" \
+            --cache-to "type=local,dest=/tmp/.buildx-cache,mode=max" \
+            --platform linux/amd64,linux/arm64 \
+            --tag ${{ env.REGISTRY }}/${{ github.repository_owner }}/mempool-pruned-${{ matrix.service }}:$TAG \
+            $EXTRA \
+            --build-arg commitHash=$SHORT_SHA \
+            --output "type=registry,push=true" \
+            ./${{ matrix.service }}/
