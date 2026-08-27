@@ -17,7 +17,17 @@ class BitcoindElectrsApi extends BitcoinApi implements AbstractBitcoinApi {
   constructor(bitcoinClient: any) {
     super(bitcoinClient);
 
-    const electrumConfig = { client: 'mempool-v2', version: '1.4' };
+    // A range, not a single version. The protocol takes [min, max] here and the
+    // server picks its own version within it, so this is what lets one build
+    // reach both an ordinary chain and one carrying BLAKE2b headers: a server on
+    // the latter refuses to negotiate below 1.8, and a server on the former
+    // still answers 1.4. Sending a bare '1.4', as upstream does, is refused
+    // outright by a BLAKE2b server with a message saying why.
+    //
+    // Safe to widen because none of the Electrum methods this class uses change
+    // shape across the range. blockchain.block.headers does change at 1.6, from
+    // a concatenated string to a list, but nothing here calls it.
+    const electrumConfig = { client: 'mempool-v2', version: ['1.4', '1.8'] };
     const electrumPersistencePolicy = { retryPeriod: 1000, maxRetry: Number.MAX_SAFE_INTEGER, callback: null };
 
     const electrumCallbacks = {
