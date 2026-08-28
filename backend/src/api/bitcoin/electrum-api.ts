@@ -12,6 +12,12 @@ import loadingIndicators from '../loading-indicators';
 import memoryCache from '../memory-cache';
 
 class BitcoindElectrsApi extends BitcoinApi implements AbstractBitcoinApi {
+  // How many transactions to ask for in one batched Electrum request. Small
+  // enough that the buffered response stays in the hundreds of kilobytes on a
+  // block of ordinary transactions, large enough that a full block is tens of
+  // round trips rather than thousands.
+  private static readonly TRANSACTION_BATCH_SIZE = 100;
+
   private electrumClient: any;
 
   constructor(bitcoinClient: any) {
@@ -293,6 +299,108 @@ class BitcoindElectrsApi extends BitcoinApi implements AbstractBitcoinApi {
       return transaction as any as IEsploraApi.Transaction;
     }
     return this.$convertTransaction(transaction, addPrevout, lazyPrevouts);
+  }
+
+  /**
+   * Every transaction in a block, without `getblock` verbosity 2.
+   *
+   * The inherited implementation asks Core for `getblock <hash> 2`. On a pruned
+   * node btc-rpc-proxy serves verbosity 0 and 1 by fetching the block from
+   * peers, but not 2, so that call fails for anything below the prune height.
+   *
+   * Verbosity 1 is enough. It gives the txid list, the proxy does serve it, and
+   * the transactions themselves come from the Electrum server the same way a
+   * single one does in $getRawTransaction. Nothing is decoded here and no
+   * verbosity-2 support is needed anywhere.
+   *
+   * Core's verbosity 2 also carries a per-transaction `fee` that this route
+   * cannot supply. That costs nothing: callers pass addPrevout=true, so
+   * $convertTransaction recomputes every fee from the inputs and Core's value
+   * is discarded either way.
+   *
+   * `fallbackToCore` is the caller's `stale` flag, and it means here what it
+   * means in the Esplora backend: an indexer follows the main chain, so a block
+   * that is not on it may be absent from the index and Core is then the better
+   * source. Core still has such a block, and being stale it is recent enough
+   * not to have been pruned, so plain verbosity 2 answers.
+   */
+  /** @asyncUnsafe */
+  async $getTxsForBlock(hash: string, fallbackToCore = false): Promise<IEsploraApi.Transaction[]> {
+    let block: IBitcoinApi.Block;
+    let rawTxs: IBitcoinApi.Transaction[];
+    try {
+      block = await this.bitcoindClient.getBlock(hash, 1);
+      // IBitcoinApi.Block types `tx` as Transaction[], but at verbosity 1 the
+      // RPC returns txids, which is what the interface's own comment on
+      // VerboseBlock.tx says and what the inherited $getTxIdsForBlock relies on.
+      const txIds = block.tx as unknown as string[];
+      rawTxs = await this.$getVerboseTransactionsBatched(txIds);
+    } catch (e) {
+      if (!fallbackToCore) {
+        throw e;
+      }
+      logger.debug(`Electrum could not serve the transactions of block ${hash}, falling back to Core: ` + (e instanceof Error ? e.message : e));
+      return super.$getTxsForBlock(hash, fallbackToCore);
+    }
+
+    const transactions: IEsploraApi.Transaction[] = [];
+    for (const tx of rawTxs) {
+      const converted = await this.$convertTransaction(tx, true, false, block.confirmations === -1);
+      converted.status = {
+        confirmed: true,
+        block_height: block.height,
+        block_hash: hash,
+        block_time: block.time,
+      };
+      transactions.push(converted);
+    }
+    return transactions;
+  }
+
+  /**
+   * Verbose transactions for a list of txids, in the order asked for.
+   *
+   * Batched because the alternative is one round trip per transaction and a
+   * block holds thousands. electrs answers a batch by running the calls in
+   * sequence and returning one array, so this saves the round trips rather than
+   * the server's work, which is the part that is worth saving over Tor.
+   *
+   * Chunked because the whole response is buffered as one string at both ends,
+   * and a block's worth of verbose transactions in a single array is tens of
+   * megabytes.
+   *
+   * Results are matched by the txid each one reports rather than by position:
+   * JSON-RPC does not promise a batch comes back in order. Any txid that does
+   * not come back throws, whether the server errored on it, omitted it, or does
+   * not support batching at all and answered with something that is not an
+   * array. A block missing transactions is worse than a block that failed to
+   * load, so this must not return a partial list.
+   */
+  /** @asyncUnsafe */
+  private async $getVerboseTransactionsBatched(txIds: string[]): Promise<IBitcoinApi.Transaction[]> {
+    const byTxId = new Map<string, IBitcoinApi.Transaction>();
+
+    for (let i = 0; i < txIds.length; i += BitcoindElectrsApi.TRANSACTION_BATCH_SIZE) {
+      const chunk = txIds.slice(i, i + BitcoindElectrsApi.TRANSACTION_BATCH_SIZE);
+      const responses = await this.electrumClient.blockchainTransaction_getBatch(chunk, true);
+      if (!Array.isArray(responses)) {
+        throw new Error('Electrum returned a non-array response to a batched transaction request');
+      }
+      for (const response of responses) {
+        const tx: IBitcoinApi.Transaction | undefined = response?.result;
+        if (tx?.txid) {
+          byTxId.set(tx.txid, tx);
+        }
+      }
+    }
+
+    return txIds.map((txId) => {
+      const tx = byTxId.get(txId);
+      if (!tx) {
+        throw new Error(`Electrum did not return transaction ${txId}`);
+      }
+      return tx;
+    });
   }
 
   /** @asyncUnsafe */
