@@ -507,6 +507,9 @@ export interface IBackendInfo {
   coreVersion: string;
   osVersion: string;
   backend: 'esplora' | 'electrum' | 'none';
+  // Lowest block height the node still holds, when it is pruned. Absent on an
+  // archival node, which is what makes the frontend notice silent there.
+  pruneHeight?: number;
 }
 
 export interface INetworkInfo {

@@ -48,6 +48,11 @@ export class BlockComponent implements OnInit, OnDestroy {
   block: BlockExtended;
   blockAudit: BlockAudit = undefined;
   blockHeight: number;
+  /**
+   * Lowest height the backing node still holds, when it is pruned. Undefined on
+   * an archival node, which is what keeps the notice below silent there.
+   */
+  pruneHeight: number | undefined;
   lastBlockHeight: number;
   nextBlockHeight: number;
   blockHash: string;
@@ -90,6 +95,7 @@ export class BlockComponent implements OnInit, OnDestroy {
   networkChangedSubscription: Subscription;
   queryParamsSubscription: Subscription;
   timeLtrSubscription: Subscription;
+  backendInfoSubscription: Subscription;
   timeLtr: boolean;
   childChangeSubscription: Subscription;
   auditPrefSubscription: Subscription;
@@ -135,6 +141,10 @@ export class BlockComponent implements OnInit, OnDestroy {
 
     this.timeLtrSubscription = this.stateService.timeLtr.subscribe((ltr) => {
       this.timeLtr = !!ltr;
+    });
+
+    this.backendInfoSubscription = this.stateService.backendInfo$.subscribe((info) => {
+      this.pruneHeight = info?.pruneHeight;
     });
 
     this.setAuditAvailable(this.auditSupported);
@@ -485,6 +495,21 @@ export class BlockComponent implements OnInit, OnDestroy {
     });
   }
 
+  /**
+   * Whether the block being viewed sits below the node's retained history.
+   *
+   * A getter rather than a template expression because `strictTemplates` is on:
+   * both operands are optional, and comparing them inline needs guards that read
+   * worse than this does.
+   */
+  get isBelowPruneHeight(): boolean {
+    return (
+      this.pruneHeight !== undefined &&
+      this.block?.height !== undefined &&
+      this.block.height < this.pruneHeight
+    );
+  }
+
   ngOnDestroy(): void {
     this.stateService.markBlock$.next({});
     this.overviewSubscription?.unsubscribe();
@@ -496,6 +521,7 @@ export class BlockComponent implements OnInit, OnDestroy {
     this.networkChangedSubscription?.unsubscribe();
     this.queryParamsSubscription?.unsubscribe();
     this.timeLtrSubscription?.unsubscribe();
+    this.backendInfoSubscription?.unsubscribe();
     this.childChangeSubscription?.unsubscribe();
     this.auditPrefSubscription?.unsubscribe();
     this.isAuditEnabledSubscription?.unsubscribe();

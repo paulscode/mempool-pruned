@@ -400,6 +400,25 @@
       >Details</button>
     </div>
 
+    <!--
+      Why this block is slower than a recent one. The node no longer holds
+      blocks below its prune height, so each input whose parent lives down there
+      is fetched back from the peer-to-peer network, one round trip at a time.
+      The result is bimodal latency with no visible cause, which reads as broken
+      rather than as working as designed.
+
+      Deliberately no time estimate: the cost depends on how many parents are
+      below the prune height and which are already cached, and neither is known
+      until the fetch is underway. A wrong estimate is worse than none.
+
+      `pruneHeight` is undefined on an archival node, so this is silent there.
+    -->
+    @if (isBelowPruneHeight) {
+      <div class="alert alert-mempool mt-2" role="alert">
+        <span i18n="block.pruned-block-notice">This block is older than the history your node keeps, so its transactions are being fetched from the Bitcoin network. That is slower, and affects only older blocks.</span>
+      </div>
+    }
+
     @defer (on viewport) {
       @if (!block?.stale) {
       <app-block-transactions [paginationMaxSize]="paginationMaxSize" [block$]="block$" [txCount]="block.tx_count" [timestamp]="block.timestamp" [blockHash]="blockHash" [previousBlockHash]="block.previousblockhash" (blockReward)="updateBlockReward($event)"></app-block-transactions>
