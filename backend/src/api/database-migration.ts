@@ -7,7 +7,7 @@ import cpfpRepository from '../repositories/CpfpRepository';
 import { RowDataPacket } from 'mysql2';
 
 class DatabaseMigration {
-  private static currentVersion = 106;
+  private static currentVersion = 107;
   private queryTimeout = 3600_000;
   private statisticsAddedIndexed = false;
   private uniqueLogs: string[] = [];
@@ -1222,6 +1222,17 @@ class DatabaseMigration {
       }
       await this.updateToSchemaVersion(106);
     }
+
+      // `blocks.header` was varchar(160), which is exactly the 80 bytes of a
+      // Bitcoin block header rendered as hex. The BLAKE2b hard fork's header v2
+      // is 164 bytes, so 328 characters, and storing one in that column either
+      // fails outright under strict SQL mode or silently keeps the first half.
+      // Neither is survivable on a chain made of them, and the failure appears
+      // at the first v2 block rather than at startup.
+      if (databaseSchemaVersion < 107) {
+        await this.$executeQuery('ALTER TABLE blocks MODIFY header varchar(400) NOT NULL');
+        await this.updateToSchemaVersion(107);
+      }
   }
 
   /**
@@ -1557,7 +1568,7 @@ class DatabaseMigration {
       ADD segwit_total_txs int unsigned NOT NULL,
       ADD segwit_total_size int unsigned NOT NULL,
       ADD segwit_total_weight int unsigned NOT NULL,
-      ADD header varchar(160) NOT NULL,
+      ADD header varchar(400) NOT NULL,
       ADD utxoset_change int NOT NULL,
       ADD utxoset_size int unsigned NULL,
       ADD total_input_amt bigint unsigned NULL
