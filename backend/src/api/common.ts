@@ -31,6 +31,30 @@ export class Common {
     '144c654344aa716d6f3abcc1ca90e5641e4e2a7f633bc09fe3baf64585819a49'
   : '6f0279e9ed041c3d710a9f57d0c02928416460c4b722ae3457a11eec381c526d';
 
+  /**
+   * The lowest block whose full transactions this node can still serve.
+   *
+   * Any backfill that reads a whole block has to stop here. Above it, one getblock
+   * call answers. Below it the node no longer has the block, and on a pruned node
+   * that turns into a peer fetch for the block plus a lookup for every input's
+   * previous transaction, which is the cost that leaves the explorer unable to keep
+   * up with the chain at all.
+   *
+   * INDEXING_BLOCKS_AMOUNT defaults to roughly a year of blocks and knows nothing
+   * about pruning, so on a node retaining a few thousand it aims tens of thousands
+   * at that path. Backfills share the indexer with the live loop, so the explorer
+   * goes down with them.
+   *
+   * Returns 0 on an archival node, where nothing needs clamping.
+   *
+   * Backfills that read only the coinbase are deliberately NOT clamped by this: an
+   * Electrum server serves a single transaction from a pruned block cheaply, so
+   * block metadata and mining statistics still reach as far back as they are asked.
+   */
+  static prunedIndexingFloor(blockchainInfo: { pruned?: boolean, pruneheight?: number }): number {
+    return blockchainInfo?.pruned ? (blockchainInfo.pruneheight ?? 0) : 0;
+  }
+
   static isLiquid(): boolean {
     return config?.MEMPOOL?.NETWORK === 'liquid' || config?.MEMPOOL?.NETWORK === 'liquidtestnet';
   }

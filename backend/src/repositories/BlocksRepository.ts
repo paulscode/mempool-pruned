@@ -932,7 +932,9 @@ class BlocksRepository {
       if (indexingBlockAmount <= -1) {
         indexingBlockAmount = currentBlockHeight + 1;
       }
-      const minHeight = Math.max(0, currentBlockHeight - indexingBlockAmount + 1);
+      // CPFP reads every transaction in the block, so it stops where the node's blocks
+      // do. See Common.prunedIndexingFloor.
+      const minHeight = Math.max(0, currentBlockHeight - indexingBlockAmount + 1, Common.prunedIndexingFloor(blockchainInfo));
 
       const [rows] = await DB.query(`
         SELECT height
