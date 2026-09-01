@@ -149,8 +149,20 @@ class Blocks {
       }
     }
 
-    // Fetch remaining txs in bulk
-    if ((isEsplora && (txIds.length - totalFound > 500)) || stale) {
+    // Fetch remaining txs in bulk.
+    //
+    // The Electrum backend takes this route at any size, not just above 500. Its
+    // $getTxsForBlock reads the whole block from Core in one call, so the threshold
+    // that makes sense for Esplora's per-transaction HTTP API does not apply: below
+    // it, the alternative is the loop under this one, which fetches every remaining
+    // transaction AND every input's previous transaction one at a time. On a pruned
+    // node each of those previous transactions is in a block the node discarded, so
+    // it becomes a peer block fetch. That is what made this backend fall behind the
+    // chain permanently; see the comment on the override.
+    //
+    // Anything already found in the mempool above is kept: this only fills gaps.
+    const isElectrum = config.MEMPOOL.BACKEND === 'electrum';
+    if ((isEsplora && (txIds.length - totalFound > 500)) || isElectrum || stale) {
       try {
         const rawTransactions = await bitcoinApi.$getTxsForBlock(blockHash, stale);
         for (const tx of rawTransactions) {

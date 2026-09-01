@@ -302,30 +302,50 @@ class BitcoindElectrsApi extends BitcoinApi implements AbstractBitcoinApi {
   }
 
   /**
-   * Every transaction in a block, without `getblock` verbosity 2.
+   * Every transaction in a block, preferring the one call that already answers.
    *
-   * The inherited implementation asks Core for `getblock <hash> 2`. On a pruned
-   * node btc-rpc-proxy serves verbosity 0 and 1 by fetching the block from
-   * peers, but not 2, so that call fails for anything below the prune height.
+   * Two routes, and which one runs is decided by whether the node still has the
+   * block.
    *
-   * Verbosity 1 is enough. It gives the txid list, the proxy does serve it, and
-   * the transactions themselves come from the Electrum server the same way a
-   * single one does in $getRawTransaction. Nothing is decoded here and no
-   * verbosity-2 support is needed anywhere.
+   * A block the node has: `getblock <hash> 2` returns every transaction AND a
+   * per-transaction fee, in a single call. Measured on a live pruned mainnet node,
+   * a 180-transaction block: 12ms.
    *
-   * Core's verbosity 2 also carries a per-transaction `fee` that this route
-   * cannot supply. That costs nothing: callers pass addPrevout=true, so
-   * $convertTransaction recomputes every fee from the inputs and Core's value
-   * is discarded either way.
+   * A block the node has pruned: verbosity 2 needs the undo data that pruning
+   * discarded, so it fails. btc-rpc-proxy serves verbosity 0 and 1 by fetching the
+   * block from peers, but it cannot reconstruct fees, so the transactions come
+   * from the Electrum server instead and their fees are recomputed from inputs.
    *
-   * `fallbackToCore` is the caller's `stale` flag, and it means here what it
-   * means in the Esplora backend: an indexer follows the main chain, so a block
-   * that is not on it may be absent from the index and Core is then the better
-   * source. Core still has such a block, and being stale it is recent enough
-   * not to have been pruned, so plain verbosity 2 answers.
+   * An earlier version of this method took the second route always, on the
+   * reasoning that Core's fee "is discarded either way" because callers pass
+   * addPrevout=true and $convertTransaction recomputes it. That is true, and on an
+   * archival node it is nearly free. On a pruned node it is the difference between
+   * working and not: recomputing a fee reads every input's previous transaction,
+   * those live in blocks the node no longer has, and each one becomes a peer block
+   * fetch through the proxy at max_peer_concurrency 3. Measured on block 963262 of
+   * the BLAKE2b chain: 180 transactions, 296 inputs, 288 distinct previous
+   * transactions, none of them resolvable locally. About 468 round trips for one
+   * block, against a 12ms call that already had the answer. Under that load even a
+   * trivial Electrum request took 4.1 seconds against 24-89ms idle, so a single
+   * block took longer than the block interval and the backend fell behind forever.
+   *
+   * So prevouts are not resolved on this path. Fees come from Core, which is the
+   * authority for them anyway. `vin[].prevout` stays null, which block indexing
+   * does not read: it needs fee and weight. The transaction page resolves prevouts
+   * on demand, for the one transaction being looked at, and still does.
+   *
+   * `fallbackToCore` is the caller's `stale` flag, and it means here what it means
+   * in the Esplora backend: an indexer follows the main chain, so a block that is
+   * not on it may be absent from the index and Core is then the better source.
    */
   /** @asyncUnsafe */
   async $getTxsForBlock(hash: string, fallbackToCore = false): Promise<IEsploraApi.Transaction[]> {
+    try {
+      return await this.$getTxsForBlockFromCore(hash);
+    } catch (e) {
+      logger.debug(`Core could not serve block ${hash} at verbosity 2 (likely pruned), using Electrum: ` + (e instanceof Error ? e.message : e));
+    }
+
     let block: IBitcoinApi.Block;
     let rawTxs: IBitcoinApi.Transaction[];
     try {
@@ -351,6 +371,33 @@ class BitcoindElectrsApi extends BitcoinApi implements AbstractBitcoinApi {
         block_height: block.height,
         block_hash: hash,
         block_time: block.time,
+      };
+      transactions.push(converted);
+    }
+    return transactions;
+  }
+
+  /**
+   * The single-call route: `getblock <hash> 2`, with Core's own fees.
+   *
+   * addPrevout is false, so $convertTransaction does not walk the inputs. It also
+   * leaves `fee` at 0, so the fee is filled in here from what Core reported.
+   * Core gives it in BTC; every other fee in this codebase is in satoshis.
+   *
+   * Throws for a pruned block, which is the signal to take the Electrum route.
+   */
+  /** @asyncUnsafe */
+  private async $getTxsForBlockFromCore(hash: string): Promise<IEsploraApi.Transaction[]> {
+    const verboseBlock: IBitcoinApi.VerboseBlock = await this.bitcoindClient.getBlock(hash, 2);
+    const transactions: IEsploraApi.Transaction[] = [];
+    for (const tx of verboseBlock.tx) {
+      const converted = await this.$convertTransaction(tx, false, false, true);
+      converted.fee = tx.fee !== undefined ? Math.round(tx.fee * 100000000) : 0;
+      converted.status = {
+        confirmed: true,
+        block_height: verboseBlock.height,
+        block_hash: hash,
+        block_time: verboseBlock.time,
       };
       transactions.push(converted);
     }
