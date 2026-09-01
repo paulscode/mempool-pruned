@@ -330,9 +330,17 @@ class BitcoindElectrsApi extends BitcoinApi implements AbstractBitcoinApi {
    * block took longer than the block interval and the backend fell behind forever.
    *
    * So prevouts are not resolved on this path. Fees come from Core, which is the
-   * authority for them anyway. `vin[].prevout` stays null, which block indexing
-   * does not read: it needs fee and weight. The transaction page resolves prevouts
-   * on demand, for the one transaction being looked at, and still does.
+   * authority for them anyway, and block indexing otherwise wants weight, which is
+   * in the block. The transaction page resolves prevouts on demand, for the one
+   * transaction being looked at, and still does.
+   *
+   * One thing does degrade. countSigops reads `vin[].prevout` to add the witness
+   * and P2SH contributions, and skips them when it is null, so a segwit input's
+   * sigops go uncounted. That feeds adjustedVsize as `max(vsize, sigops * 5)`,
+   * which for all but deliberately sigop-heavy transactions is the vsize term
+   * anyway, so the effective fee rate is unchanged for ordinary traffic. It is a
+   * real cost, not a free one, and it buys an explorer that keeps up with the
+   * chain instead of one that does not.
    *
    * `fallbackToCore` is the caller's `stale` flag, and it means here what it means
    * in the Esplora backend: an indexer follows the main chain, so a block that is
@@ -343,7 +351,15 @@ class BitcoindElectrsApi extends BitcoinApi implements AbstractBitcoinApi {
     try {
       return await this.$getTxsForBlockFromCore(hash);
     } catch (e) {
-      logger.debug(`Core could not serve block ${hash} at verbosity 2 (likely pruned), using Electrum: ` + (e instanceof Error ? e.message : e));
+      // A pruned block is the expected reason and says so; anything else means
+      // this route broke and every block is quietly taking the slow one, which is
+      // how the first version of this shipped.
+      const reason = e instanceof Error ? e.message : String(e);
+      if (reason.includes('pruned')) {
+        logger.debug(`Block ${hash} is pruned, reading its transactions from Electrum instead`);
+      } else {
+        logger.warn(`Reading block ${hash} from Core failed for an unexpected reason, falling back to Electrum: ${reason}`);
+      }
     }
 
     let block: IBitcoinApi.Block;
@@ -391,7 +407,20 @@ class BitcoindElectrsApi extends BitcoinApi implements AbstractBitcoinApi {
     const verboseBlock: IBitcoinApi.VerboseBlock = await this.bitcoindClient.getBlock(hash, 2);
     const transactions: IEsploraApi.Transaction[] = [];
     for (const tx of verboseBlock.tx) {
-      const converted = await this.$convertTransaction(tx, false, false, true);
+      // getblock's transactions carry no confirmations of their own, unlike
+      // getrawtransaction's, so they have to be told. Without that
+      // $convertTransaction reads them as unconfirmed and asks the node for a
+      // mempool entry for each, which for a mined transaction fails with
+      // "Transaction not in mempool" -- one failing RPC per transaction, and the
+      // whole block falling back to the slow route on the first one.
+      const confirmedTx: IBitcoinApi.Transaction = {
+        ...tx,
+        blockhash: hash,
+        confirmations: verboseBlock.confirmations,
+        blocktime: verboseBlock.time,
+        time: verboseBlock.time,
+      };
+      const converted = await this.$convertTransaction(confirmedTx, false, false, true);
       converted.fee = tx.fee !== undefined ? Math.round(tx.fee * 100000000) : 0;
       converted.status = {
         confirmed: true,
