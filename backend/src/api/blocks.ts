@@ -581,7 +581,16 @@ class Blocks {
           indexedThisRun = 0;
         }
 
-        await this.$indexBlockSummary(block.hash, block.height, block.stale);
+        // One block that cannot be summarised must not abort the backfill. Upstream lets
+        // the throw reach the outer catch, which retries the whole run from the start in
+        // ten seconds, so a single bad block becomes an infinite loop that indexes
+        // nothing and says only "Reason: <message>" with no block to look at.
+        try {
+          await this.$indexBlockSummary(block.hash, block.height, block.stale);
+        } catch (e) {
+          logger.warn(`Could not summarise block #${block.height} (${block.hash}), skipping it: ` + (e instanceof Error ? e.message : e), logger.tags.mining);
+          continue;
+        }
 
         // Logging
         indexedThisRun++;
