@@ -14,7 +14,7 @@ import chainTips from '../api/chain-tips';
 import blocks from '../api/blocks';
 import BlocksAuditsRepository from './BlocksAuditsRepository';
 import transactionUtils from '../api/transaction-utils';
-import { parseDATUMTemplateCreator } from '../utils/bitcoin-script';
+import { parseDATUMTemplateCreator, displayMinerName } from '../utils/bitcoin-script';
 import poolsUpdater from '../tasks/pools-updater';
 
 interface DatabaseBlock {
@@ -1334,6 +1334,9 @@ class BlocksRepository {
     if (extras.pool.name === 'OCEAN') {
       extras.pool.minerNames = parseDATUMTemplateCreator(extras.coinbaseRaw);
     }
+
+    // No pool matched, so read the miner's own tag out of the coinbase.
+    extras.pool.name = displayMinerName(extras.pool.name, extras.coinbaseRaw);
 
     blk.extras = <BlockExtension>extras;
     return <BlockExtended>blk;

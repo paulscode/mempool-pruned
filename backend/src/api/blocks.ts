@@ -33,7 +33,7 @@ import AccelerationRepository from '../repositories/AccelerationRepository';
 import { calculateFastBlockCpfp, calculateGoodBlockCpfp } from './cpfp';
 import mempool from './mempool';
 import CpfpRepository from '../repositories/CpfpRepository';
-import { parseDATUMTemplateCreator } from '../utils/bitcoin-script';
+import { parseDATUMTemplateCreator, displayMinerName } from '../utils/bitcoin-script';
 import database from '../database';
 import { getBlockFirstSeenFromLogs, getOldestLogTimestampFromLogs, scanLogsForBlocksFirstSeen } from '../utils/file-read';
 
@@ -371,6 +371,9 @@ class Blocks {
         if (extras.pool.name === 'OCEAN') {
           extras.pool.minerNames = parseDATUMTemplateCreator(extras.coinbaseRaw);
         }
+
+        // No pool matched, so read the miner's own tag out of the coinbase.
+        extras.pool.name = displayMinerName(extras.pool.name, extras.coinbaseRaw);
       }
 
       extras.matchRate = null;

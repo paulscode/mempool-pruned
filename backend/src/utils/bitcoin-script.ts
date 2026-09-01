@@ -202,6 +202,100 @@ export function getVarIntLength(n: number): number {
   }
 }
 
+/**
+ * The miner's self-declared tag from a coinbase, for when no known pool matches.
+ *
+ * Blocks are attributed by matching the coinbase against a curated list of pools.
+ * That list is a canonicalisation aid: it maps the many tags and payout addresses
+ * of one pool onto a single identity, and supplies an icon. It is not where the
+ * identity comes from. The coinbase carries it, which is why parseDATUMTemplateCreator
+ * above can read miner names straight out of one.
+ *
+ * On a chain whose miners are mostly solo and self-named, the curated list matches
+ * nothing and every block reads "Unknown" while the coinbase plainly says who mined
+ * it. Observed on BLAKE2b mainnet: Knots, PyBLOCK-LOTTO-BLAKE2b, PlebMiner,
+ * ghost_of_nobody, Mustard Seed, MIISSBLUEE.
+ *
+ * `headline` is dropped when present. On a chain that requires a phrase in every
+ * coinbase, that phrase is in every block and identifies nobody.
+ *
+ * Returns null when nothing readable is left, so the caller keeps saying Unknown
+ * rather than showing punctuation.
+ */
+/**
+ * The phrase this chain's consensus requires in every coinbase.
+ *
+ * It is in every block by rule, so it identifies nobody and must not be mistaken
+ * for a miner's tag. Named here rather than in config because it is a property of
+ * the chain this fork follows, not a deployment choice.
+ */
+export const CONSENSUS_COINBASE_HEADLINE = '8-30 NYPost Deride And Conquer';
+
+/**
+ * The name to show for a block: the matched pool, or failing that whatever the
+ * miner called itself in the coinbase.
+ *
+ * Only fills in for the unknown pool, so a real pool match always wins and keeps
+ * its canonical name and icon.
+ *
+ * The block's pool_id is untouched, and still points at the unknown pool. That is
+ * deliberate: pool statistics group by id, and a self-declared tag is not a pool
+ * identity. Anyone counting hashrate share still sees these as unattributed, while
+ * anyone reading the block list sees who mined it.
+ */
+export function displayMinerName(poolName: string, coinbaseRaw: string | undefined): string {
+  if (poolName !== 'Unknown' || !coinbaseRaw) {
+    return poolName;
+  }
+  return parseCoinbaseMinerTag(coinbaseRaw, CONSENSUS_COINBASE_HEADLINE) ?? poolName;
+}
+
+export function parseCoinbaseMinerTag(coinbaseRaw: string, headline?: string): string | null {
+  if (!coinbaseRaw || coinbaseRaw.length < 4) {
+    return null;
+  }
+  const bytes: number[] = [];
+  for (let c = 0; c < coinbaseRaw.length; c += 2) {
+    bytes.push(parseInt(coinbaseRaw.slice(c, c + 2), 16));
+  }
+
+  // Skip the BIP34 height push, exactly as parseDATUMTemplateCreator does.
+  let tagLengthByte = 1 + bytes[0];
+  if (tagLengthByte >= bytes.length) {
+    return null;
+  }
+  let tagsLength = bytes[tagLengthByte];
+  if (tagsLength === 0x4c) {
+    tagLengthByte += 1;
+    tagsLength = bytes[tagLengthByte];
+  }
+  const tagStart = tagLengthByte + 1;
+  const tagString = String.fromCharCode(...bytes.slice(tagStart, tagStart + tagsLength));
+
+  // The push often holds more than one field, separated by a non-printable byte.
+  // Split on any run of them and consider each field on its own.
+  const candidates = tagString
+    .split(/[\x00-\x1f\x7f]+/)
+    .map((field) => field.trim())
+    .filter((field) => field.length > 0);
+
+  const normalizedHeadline = headline ? headline.trim().toLowerCase() : null;
+  for (const field of candidates) {
+    if (normalizedHeadline && field.toLowerCase().includes(normalizedHeadline)) {
+      continue;
+    }
+    // A pool prefixes its tag with a slash by convention (/AntPool/); a solo miner
+    // usually does not. Either way the slashes are punctuation, not part of a name.
+    const name = field.replace(/^\/+|\/+$/g, '').trim();
+    // Two characters of something printable, or it is extranonce noise that
+    // happened to fall in the ASCII range.
+    if (name.length >= 2 && /[a-zA-Z0-9]/.test(name)) {
+      return name.length > 40 ? name.slice(0, 40) : name;
+    }
+  }
+  return null;
+}
+
 /** Extracts miner names from a DATUM coinbase transaction */
 export function parseDATUMTemplateCreator(coinbaseRaw: string): string[] | null {
   const bytes: number[] = [];
