@@ -525,7 +525,29 @@ class Blocks {
       if (indexingBlockAmount <= -1) {
         indexingBlockAmount = currentBlockHeight + 1;
       }
-      const lastBlockToIndex = Math.max(0, currentBlockHeight - indexingBlockAmount + 1);
+      /*
+       * Summaries stop at the prune height, whatever INDEXING_BLOCKS_AMOUNT says.
+       *
+       * A summary needs every transaction in the block. Above the prune height that
+       * is one `getblock` call. Below it the node no longer has the block, so each
+       * one costs a peer fetch for the block plus a lookup for every input's
+       * previous transaction, which is the cost that made the live indexer unable to
+       * keep up with the chain in the first place.
+       *
+       * The default INDEXING_BLOCKS_AMOUNT is a year of blocks. On a node retaining
+       * a few thousand, that aims tens of thousands of blocks at the expensive path
+       * and, because this backfill shares the indexer with the live loop, takes the
+       * explorer down with it. Better to summarise what can be summarised.
+       *
+       * Block metadata indexing is deliberately NOT clamped this way: it reads only
+       * the coinbase, which an Electrum server serves for a pruned block cheaply, so
+       * history there goes back as far as it is asked to.
+       */
+      const prunedFloor = blockchainInfo.pruned ? (blockchainInfo.pruneheight ?? 0) : 0;
+      const lastBlockToIndex = Math.max(0, currentBlockHeight - indexingBlockAmount + 1, prunedFloor);
+      if (prunedFloor > 0 && prunedFloor > currentBlockHeight - indexingBlockAmount + 1) {
+        logger.info(`Block summaries indexing stops at #${prunedFloor}, the prune height: below it this node no longer has the blocks to summarise`, logger.tags.mining);
+      }
 
       // Get all indexed block hash
       const indexedBlocks = (await blocksRepository.$getIndexedBlocks()).filter(block => block.height >= lastBlockToIndex);
