@@ -24,7 +24,15 @@ class BitcoinApi implements AbstractBitcoinApi {
       timestamp: block.time,
       bits: parseInt(block.bits, 16),
       nonce: block.nonce,
-      difficulty: block.difficulty,
+      // Knots 29.4.2.knots20260508 (#420) renamed this to difficulty_blake2b for
+      // header-v2 blocks and omits the old field entirely, so on the BLAKE2b chain
+      // every block would otherwise arrive here with no difficulty at all. The two
+      // are different units and were never comparable, which is why the field was
+      // split. A block below the BLAKE2b activation still reports the old name, so
+      // the fallback picks the right one per block rather than per chain. The zero
+      // is unreachable against a real node and is here because the esplora shape
+      // this converts to requires a number.
+      difficulty: block.difficulty ?? block.difficulty_blake2b ?? 0,
       merkle_root: block.merkleroot,
       tx_count: block.nTx,
       size: block.size,
