@@ -184,7 +184,12 @@ class MiningRoutes {
     let currentHashrate = 0, currentDifficulty = 0;
     try {
       currentHashrate = await bitcoinClient.getNetworkHashPs(1008);
-      currentDifficulty = await bitcoinClient.getDifficulty();
+      // Knots 29.4.2.knots20260508 removed the getdifficulty RPC outright, so
+      // asking for it throws against an updated node and this whole block falls
+      // to the catch, reporting a zeroed difficulty. getblockchaininfo carries
+      // the figure under whichever name applies to the chain.
+      const chainInfo = await bitcoinClient.getBlockchainInfo();
+      currentDifficulty = chainInfo.difficulty ?? chainInfo.difficulty_blake2b ?? 0;
     } catch (e) {
       logger.debug('Bitcoin Core is not available, using zeroed value for current hashrate and difficulty');
     }

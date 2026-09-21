@@ -30,6 +30,9 @@ module.exports = {
   getChainTips: 'getchaintips', // bitcoind v0.10.0+
   getChainTxStats: 'getchaintxstats',
   getConnectionCount: 'getconnectioncount',
+  // Removed outright by Knots 29.4.2.knots20260508 (#420). Nothing calls this;
+  // against a node on the BLAKE2b chain it will throw. Read the figure from
+  // getblockchaininfo instead, which reports difficulty_blake2b there.
   getDifficulty: 'getdifficulty',
   getGenerate: 'getgenerate',
   getInfo: 'getinfo',
