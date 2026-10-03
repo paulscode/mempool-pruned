@@ -29,7 +29,7 @@ class FundingTxFetcher {
   }
 
   /** @asyncUnsafe */
-  async $fetchChannelsFundingTxs(channelIds: string[]): Promise<void> {
+  async $fetchChannelsFundingTxs(channelIds: string[], known: Record<string, KnownFunding> = {}): Promise<void> {
     if (this.running) {
       return;
     }
@@ -41,7 +41,7 @@ class FundingTxFetcher {
     let channelProcessed = 0;
     this.channelNewlyProcessed = 0;
     for (const channelId of channelIds) {
-      await this.$fetchChannelOpenTx(channelId);
+      await this.$fetchChannelOpenTx(channelId, known[channelId]);
       ++channelProcessed;
 
       let elapsedSeconds = Math.round((new Date().getTime() / 1000) - loggerTimer);
@@ -76,8 +76,22 @@ class FundingTxFetcher {
     this.running = false;
   }
 
-  /** @asyncUnsafe */
-  public async $fetchChannelOpenTx(channelId: string): Promise<{timestamp: number, txid: string, value: number} | null> {
+  /**
+   * The funding transaction of a channel: its txid, the funding output's
+   * value in BTC, and the time of the block it confirmed in.
+   *
+   * Upstream reads the whole block and then the transaction by txid, which
+   * needs `txindex` and the block itself. A pruned node has no `txindex`,
+   * and a block old enough is gone, so neither works there. What the caller
+   * already knows from the Lightning node (the funding outpoint and the
+   * capacity, which is that output's value) is used instead when given, and
+   * the date comes from the block header, which a pruned node always keeps.
+   * Otherwise the block is read with its transactions (verbosity 2, no
+   * `txindex`), which works while the node still has it.
+   *
+   * @asyncUnsafe
+   */
+  public async $fetchChannelOpenTx(channelId: string, known?: KnownFunding): Promise<{timestamp: number, txid: string, value: number} | null> {
     channelId = Common.channelIntegerIdToShortId(channelId);
 
     if (!channelId?.length) {
@@ -93,48 +107,77 @@ class FundingTxFetcher {
       logger.debug(`Channel ID ${channelId} does not seem valid, should contains at least 3 parts separated by 'x'`, logger.tags.ln);
       return null;
     }
-    const blockHeight = parts[0];
-    const txIdx = parts[1];
-    const outputIdx = parts[2];
+    const blockHeight = parseInt(parts[0], 10);
+    const txIdx = parseInt(parts[1], 10);
+    const outputIdx = parseInt(parts[2], 10);
 
-    let block = this.blocksCache[blockHeight];
-    // Fetch it from core
-    if (!block) {
-      const blockHash = await bitcoinClient.getBlockHash(parseInt(blockHeight, 10));
-      block = await bitcoinClient.getBlock(blockHash, 1);
+    let blockHash: string;
+    try {
+      blockHash = await bitcoinClient.getBlockHash(blockHeight);
+    } catch (e) {
+      logger.debug(`Cannot find block ${blockHeight} for channel ${channelId}: ${e instanceof Error ? e.message : e}`, logger.tags.ln);
+      return null;
     }
-    this.blocksCache[block.height] = block;
 
-    const blocksCacheHashes = Object.keys(this.blocksCache).sort((a, b) => parseInt(b) - parseInt(a)).reverse();
-    if (blocksCacheHashes.length > BLOCKS_CACHE_MAX_SIZE) {
-      for (let i = 0; i < 10; ++i) {
-        delete this.blocksCache[blocksCacheHashes[i]];
+    let funding: {timestamp: number, txid: string, value: number} | null = null;
+
+    const knownValue = known?.value ?? 0;
+    const knownTxid = known?.txid ?? '';
+    if (knownValue > 0 && knownTxid.length === 64) {
+      try {
+        const header = await bitcoinClient.getBlockHeader(blockHash, true);
+        funding = { timestamp: header.time, txid: knownTxid, value: knownValue };
+      } catch (e) {
+        logger.debug(`Cannot read the header of block ${blockHeight} for channel ${channelId}: ${e instanceof Error ? e.message : e}`, logger.tags.ln);
+        return null;
       }
+    } else {
+      let block = this.blocksCache[blockHeight];
+      if (!block) {
+        try {
+          block = await bitcoinClient.getBlock(blockHash, 2);
+        } catch (e) {
+          // Pruned, most likely: without what the Lightning node knows
+          // there is nothing more to read.
+          logger.debug(`Cannot read block ${blockHeight} for channel ${channelId} funding tx: ${e instanceof Error ? e.message : e}`, logger.tags.ln);
+          return null;
+        }
+        this.blocksCache[blockHeight] = block;
+        const heights = Object.keys(this.blocksCache).sort((a, b) => parseInt(a, 10) - parseInt(b, 10));
+        if (heights.length > BLOCKS_CACHE_MAX_SIZE) {
+          for (let i = 0; i < 10; ++i) {
+            delete this.blocksCache[heights[i]];
+          }
+        }
+      }
+      const tx = block.tx?.[txIdx];
+      if (!tx || !tx.vout || tx.vout.length < outputIdx + 1 || tx.vout[outputIdx].value === undefined) {
+        logger.err(`Cannot find blockchain funding tx for channel id ${channelId}. Possible reasons are: bitcoin backend timeout or the channel shortId is not valid`);
+        return null;
+      }
+      funding = { timestamp: block.time, txid: tx.txid, value: tx.vout[outputIdx].value };
     }
 
-    const txid = block.tx[txIdx];
-    if (!txid) {
-      logger.debug(`Cannot cache ${channelId} funding tx. TX index ${txIdx} does not exist in block ${block.hash ?? block.id}`, logger.tags.ln);
-      return null;
-    }
-    const rawTx = await bitcoinClient.getRawTransaction(txid);
-    const tx = await bitcoinClient.decodeRawTransaction(rawTx);
-
-    if (!tx || !tx.vout || tx.vout.length < parseInt(outputIdx, 10) + 1 || tx.vout[outputIdx].value === undefined) {
-      logger.err(`Cannot find blockchain funding tx for channel id ${channelId}. Possible reasons are: bitcoin backend timeout or the channel shortId is not valid`);
-      return null;
-    }
-
-    this.fundingTxCache[channelId] = {
-      timestamp: block.time,
-      txid: txid,
-      value: tx.vout[outputIdx].value,
-    };
-
+    this.fundingTxCache[channelId] = funding;
     ++this.channelNewlyProcessed;
 
-    return this.fundingTxCache[channelId];
+    return funding;
   }
+}
+
+/**
+ * What the Lightning node says about a channel's funding: the funding
+ * transaction's id and the capacity in BTC (the funding output's value).
+ */
+export interface KnownFunding {
+  txid?: string;
+  value?: number;
+}
+
+/** The funding txid of a `txid:vout` channel point, or ''. */
+export function txidOfChanPoint(chanPoint?: string): string {
+  const txid = (chanPoint ?? '').split(':')[0];
+  return /^[0-9a-f]{64}$/i.test(txid) ? txid : '';
 }
 
 export default new FundingTxFetcher;

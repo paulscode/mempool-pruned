@@ -1,7 +1,7 @@
 import DB from '../../../database';
 import { promises } from 'fs';
 import logger from '../../../logger';
-import fundingTxFetcher from './funding-tx-fetcher';
+import fundingTxFetcher, { KnownFunding, txidOfChanPoint } from './funding-tx-fetcher';
 import config from '../../../config';
 import { ILightningApi } from '../../../api/lightning/lightning-api.interface';
 import { isIP } from 'net';
@@ -17,9 +17,15 @@ class LightningStatsImporter {
   /** @asyncSafe */
   async $run(): Promise<void> {
     try {
-      const [channels]: any[] = await DB.query('SELECT short_id from channels;');
+      const [channels]: any[] = await DB.query('SELECT short_id, transaction_id, capacity from channels;');
       logger.info(`Caching funding txs for currently existing channels`, logger.tags.ln);
-      await fundingTxFetcher.$fetchChannelsFundingTxs(channels.map(channel => channel.short_id));
+      // What the Lightning node reported for each channel, so that a pruned
+      // node need not have the funding block (see FundingTxFetcher).
+      const known: Record<string, KnownFunding> = {};
+      for (const channel of channels) {
+        known[channel.short_id] = { txid: channel.transaction_id, value: Number(channel.capacity) / 100000000 };
+      }
+      await fundingTxFetcher.$fetchChannelsFundingTxs(channels.map(channel => channel.short_id), known);
 
       if (config.MEMPOOL.NETWORK !== 'mainnet' || config.DATABASE.ENABLED === false) {
         return;
@@ -114,7 +120,10 @@ class LightningStatsImporter {
         continue;
       }
 
-      const tx = await fundingTxFetcher.$fetchChannelOpenTx(short_id);
+      const tx = await fundingTxFetcher.$fetchChannelOpenTx(short_id, {
+        txid: txidOfChanPoint(channel.chan_point),
+        value: Number(channel.capacity) / 100000000,
+      });
       if (!tx) {
         logger.err(`Unable to fetch funding tx for channel ${short_id}. Capacity and creation date is unknown. Skipping channel.`, logger.tags.ln);
         continue;

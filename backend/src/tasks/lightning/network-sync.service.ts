@@ -211,7 +211,10 @@ class NetworkSyncService {
     try {
       const channels = await channelsApi.$getChannelsWithoutCreatedDate();
       for (const channel of channels) {
-        const transaction = await fundingTxFetcher.$fetchChannelOpenTx(channel.short_id);
+        const transaction = await fundingTxFetcher.$fetchChannelOpenTx(channel.short_id, {
+          txid: channel.transaction_id,
+          value: Number(channel.capacity) / 100000000,
+        });
         if (!transaction) {
           continue;
         }
