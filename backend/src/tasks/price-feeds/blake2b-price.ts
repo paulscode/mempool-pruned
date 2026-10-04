@@ -88,6 +88,11 @@ export function btcb2Prices(btcb2Usd: number | null, rates: any, currencies: str
   return out;
 }
 
+/** Coingecko's rate table, or undefined. @asyncUnsafe */
+export async function $fetchCoingeckoRates(): Promise<any> {
+  return query(COINGECKO_RATES_URL).catch(() => undefined);
+}
+
 /** @asyncUnsafe */
 export async function $fetchBtcb2Prices(currencies: string[]): Promise<{ [currency: string]: number }> {
   const tickers = await query(NEOXA_TICKER_URL);

@@ -10,7 +10,7 @@ import GeminiApi from './price-feeds/gemini-api';
 import KrakenApi from './price-feeds/kraken-api';
 import FreeCurrencyApi from './price-feeds/free-currency-api';
 import bitcoinClient from '../api/bitcoin/bitcoin-client';
-import { $fetchBtcb2HourlyCloses, $fetchBtcb2Prices, BLAKE2B_MARKER, FORK_HEIGHT } from './price-feeds/blake2b-price';
+import { $fetchBtcb2HourlyCloses, $fetchBtcb2Prices, $fetchCoingeckoRates, BLAKE2B_MARKER, btcb2Prices, FORK_HEIGHT } from './price-feeds/blake2b-price';
 
 export interface PriceFeed {
   name: string;
@@ -235,10 +235,11 @@ class PriceUpdater {
   }
 
   /**
-   * BTCB2 dollar prices from Neoxa's hourly candles, for the hours not recorded
-   * yet. Only dollars are stored: the explorer converts a missing currency from
-   * dollars at the current rate, which is better than inventing a past exchange
-   * rate. The fork itself gets the first real hour's price, so that a transaction
+   * BTCB2 prices from Neoxa's hourly candles, for the hours not recorded yet.
+   * Neoxa quotes dollars; other currencies are converted at today's Coingecko
+   * ratio, which is what the explorer would do for a currency a row lacks, and
+   * a row lacking them would also leave the explorer's own conversion rates,
+   * which it takes from the newest row, at zero. The fork itself gets the first real hour's price, so that a transaction
    * between the fork and the listing is valued at what BTCB2 first traded at,
    * not at the price of a coin it had stopped being.
    *
@@ -257,13 +258,14 @@ class PriceUpdater {
     if (closes[0].time > this.forkTime) {
       rows.unshift({ time: this.forkTime, usd: closes[0].close });
     }
+    const rates = await $fetchCoingeckoRates();
+    const currencies = [...this.currencies, ...this.newCurrencies];
     let inserted = 0;
     for (const row of rows) {
       if (existing.has(row.time)) {
         continue;
       }
-      const prices = this.getEmptyPricesObj();
-      prices.USD = row.usd;
+      const prices = { ...this.getEmptyPricesObj(), ...btcb2Prices(row.usd, rates, currencies) };
       await PricesRepository.$savePrices(row.time, prices, true);
       ++inserted;
     }
