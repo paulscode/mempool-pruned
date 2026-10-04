@@ -9,6 +9,8 @@ import CoinbaseApi from './price-feeds/coinbase-api';
 import GeminiApi from './price-feeds/gemini-api';
 import KrakenApi from './price-feeds/kraken-api';
 import FreeCurrencyApi from './price-feeds/free-currency-api';
+import bitcoinClient from '../api/bitcoin/bitcoin-client';
+import { $fetchBtcb2HourlyCloses, $fetchBtcb2Prices, BLAKE2B_MARKER, FORK_HEIGHT } from './price-feeds/blake2b-price';
 
 export interface PriceFeed {
   name: string;
@@ -62,6 +64,10 @@ class PriceUpdater {
   private lastTimeConversionsRatesFetched: number = 0;
   private latestConversionsRatesFromFeed: ConversionRates = { USD: -1 };
   private ratesChangedCallback: ((rates: ApiPrice) => void) | undefined;
+  // Which chain the node follows, decided once it has the BLAKE2b chain's first
+  // block of its own: null until then. See $detectChain.
+  private chain: 'blake2b' | 'sha256' | null = null;
+  private forkTime = 0;
 
   constructor() {
     this.latestPrices = this.getEmptyPricesObj();
@@ -147,6 +153,16 @@ class PriceUpdater {
     }
     this.running = true;
 
+    try {
+      await this.$detectChain();
+    } catch (e) {
+      logger.err(`Cannot tell which chain the prices are for. Reason: ${e instanceof Error ? e.message : e}`, logger.tags.mining);
+    }
+    if (this.chain === null) {
+      this.running = false;
+      return;
+    }
+
     if ((Math.round(new Date().getTime() / 1000) - this.lastHistoricalRun) > 3600 * 24) {
       // Once a day, look for missing prices (could happen due to network connectivity issues)
       this.historyInserted = false;
@@ -183,6 +199,77 @@ class PriceUpdater {
     }
 
     this.running = false;
+  }
+
+  /**
+   * The two mainnet chains share every block below FORK_HEIGHT and so every
+   * exchange price before the fork, and after it their coins are priced apart:
+   * the BLAKE2b chain's from Neoxa (see blake2b-price.ts), the SHA256 chain's from
+   * the exchanges as upstream does. Which one the node follows is told by block
+   * BLAKE2B_MARKER.height, as Lightning Fork does. Until the node has that block
+   * there is no telling, and nothing is fetched or recorded rather than guessed.
+   *
+   * @asyncUnsafe
+   */
+  private async $detectChain(): Promise<void> {
+    if (this.chain !== null) {
+      return;
+    }
+    let hash: string;
+    try {
+      hash = await bitcoinClient.getBlockHash(BLAKE2B_MARKER.height);
+    } catch (e) {
+      logger.debug(`Prices wait for the node to reach block ${BLAKE2B_MARKER.height}, which tells the chains apart: ${e instanceof Error ? e.message : e}`, logger.tags.mining);
+      return;
+    }
+    const forkHeader = await bitcoinClient.getBlockHeader(await bitcoinClient.getBlockHash(FORK_HEIGHT), true);
+    this.forkTime = forkHeader.time;
+    this.chain = hash === BLAKE2B_MARKER.hash ? 'blake2b' : 'sha256';
+    PricesRepository.exchangePricesEnd = this.chain === 'blake2b' ? this.forkTime : null;
+    if (config.DATABASE.ENABLED === true) {
+      await PricesRepository.$claimPricesAfterFork(this.chain, this.forkTime, FORK_HEIGHT);
+      // What was loaded at start may be the other chain's, deleted just now.
+      await this.$initializeLatestPriceWithDb();
+    }
+    logger.info(`Prices follow the ${this.chain === 'blake2b' ? 'BLAKE2b chain (Neoxa BTCB2)' : 'SHA256 chain (exchanges)'} from the fork at ${new Date(this.forkTime * 1000).toISOString()}`, logger.tags.mining);
+  }
+
+  /**
+   * BTCB2 dollar prices from Neoxa's hourly candles, for the hours not recorded
+   * yet. Only dollars are stored: the explorer converts a missing currency from
+   * dollars at the current rate, which is better than inventing a past exchange
+   * rate. The fork itself gets the first traded price, so that a transaction
+   * between the fork and the listing is valued at what BTCB2 first traded at,
+   * not at the price of a coin it had stopped being.
+   *
+   * @asyncUnsafe
+   */
+  private async $insertBtcb2History(): Promise<void> {
+    const closes = await $fetchBtcb2HourlyCloses();
+    if (closes.length === 0) {
+      logger.warn(`No BTCB2 price history from Neoxa; trying again later`, logger.tags.mining);
+      return;
+    }
+    const existing = new Set(await PricesRepository.$getPricesTimes());
+    const rows: { time: number, usd: number }[] = closes
+      .filter(c => c.time >= this.forkTime)
+      .map(c => ({ time: c.time, usd: c.close }));
+    if (closes[0].time > this.forkTime) {
+      rows.unshift({ time: this.forkTime, usd: closes[0].open });
+    }
+    let inserted = 0;
+    for (const row of rows) {
+      if (existing.has(row.time)) {
+        continue;
+      }
+      const prices = this.getEmptyPricesObj();
+      prices.USD = row.usd;
+      await PricesRepository.$savePrices(row.time, prices, true);
+      ++inserted;
+    }
+    if (inserted > 0) {
+      logger.notice(`Inserted ${inserted} hourly BTCB2 prices from Neoxa into the db`, logger.tags.mining);
+    }
   }
 
   private setLatestPrice(currency, price): void {
@@ -236,7 +323,16 @@ class PriceUpdater {
       return;
     }
 
-    for (const currency of this.currencies) {
+    if (this.chain === 'blake2b') {
+      const btcb2 = await $fetchBtcb2Prices([...this.currencies, ...this.newCurrencies]);
+      for (const currency of Object.keys(btcb2)) {
+        if (btcb2[currency] < MAX_PRICES[currency]) {
+          this.setLatestPrice(currency, btcb2[currency]);
+        }
+      }
+    }
+
+    for (const currency of (this.chain === 'blake2b' ? [] : this.currencies)) {
       let prices: number[] = [];
 
       for (const feed of this.feeds) {
@@ -279,7 +375,7 @@ class PriceUpdater {
       try {
         const p = 60 * 60 * 1000; // milliseconds in an hour
         const nowRounded = new Date(Math.round(new Date().getTime() / p) * p); // https://stackoverflow.com/a/28037042
-        await PricesRepository.$savePrices(nowRounded.getTime() / 1000, this.latestPrices);
+        await PricesRepository.$savePrices(nowRounded.getTime() / 1000, this.latestPrices, this.chain === 'blake2b');
       } catch (e) {
         logger.err(`Cannot save latest prices into db. Trying again in 5 minutes. Reason: ${(e instanceof Error ? e.message : e)}`);
       }
@@ -291,10 +387,11 @@ class PriceUpdater {
       this.cyclePosition++;
     }
 
+    const coin = this.chain === 'blake2b' ? 'BTCB2' : 'BTC';
     if (this.latestPrices.USD === -1) {
-      logger.warn(`No BTC price available, falling back to latest known price: ${JSON.stringify(this.latestGoodPrices)}`);
+      logger.warn(`No ${coin} price available, falling back to latest known price: ${JSON.stringify(this.latestGoodPrices)}`);
     } else {
-      logger.info(`Latest BTC fiat averaged price: ${JSON.stringify(this.latestGoodPrices)}`);
+      logger.info(`Latest ${coin} fiat ${this.chain === 'blake2b' ? '(Neoxa)' : 'averaged'} price: ${JSON.stringify(this.latestGoodPrices)}`);
     }
 
     if (this.ratesChangedCallback && this.latestGoodPrices.USD > 0) {
@@ -343,6 +440,12 @@ class PriceUpdater {
     // Insert missing recent hourly prices
     await this.$insertMissingRecentPrices('day');
     await this.$insertMissingRecentPrices('hour');
+
+    // Exchange history stops at the fork on the BLAKE2b chain (see
+    // PricesRepository.exchangePricesEnd); Neoxa's takes over from there.
+    if (this.chain === 'blake2b') {
+      await this.$insertBtcb2History();
+    }
 
     this.historyInserted = true;
     this.lastHistoricalRun = Math.round(new Date().getTime() / 1000);

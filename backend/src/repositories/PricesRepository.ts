@@ -165,7 +165,22 @@ export const MAX_PRICES = {
 };
 
 class PricesRepository {
-  public async $savePrices(time: number, prices: ApiPrice): Promise<void> {
+  /**
+   * On the BLAKE2b chain, the time from which exchange history no longer applies:
+   * before the fork the two chains' coins were one coin and every exchange's
+   * bitcoin price is its price, after it they are not. Saves of exchange prices
+   * at or after this time are dropped. Null on the SHA256 chain, where nothing is.
+   */
+  public exchangePricesEnd: number | null = null;
+
+  /**
+   * `ownChain` marks a price of this chain's own coin (the BLAKE2b feed), which
+   * the cutoff above does not apply to.
+   */
+  public async $savePrices(time: number, prices: ApiPrice, ownChain = false): Promise<void> {
+    if (!ownChain && this.exchangePricesEnd !== null && time >= this.exchangePricesEnd) {
+      return;
+    }
     if (prices.USD === -1) {
       // Some historical price entries have no USD prices, so we just ignore them to avoid future UX issues
       // As of today there are only 4 (on 2013-09-05, 2013-0909, 2013-09-12 and 2013-09-26) so that's fine
@@ -200,6 +215,34 @@ class PricesRepository {
       logger.err(`Cannot save exchange rate into db. Reason: ` + (e instanceof Error ? e.message : e));
       throw e;
     }
+  }
+
+  /**
+   * Which chain the prices after the fork belong to, so that a database built
+   * against one chain is not read as the other's. The first time this runs on an
+   * install, and again whenever the explorer is pointed at the other chain, the
+   * prices from the fork onwards are deleted, with the blocks' links to them: on the SHA256 chain the exchange
+   * backfill then restores what it can, and on the BLAKE2b chain this explorer's
+   * own recordings replace them. An install that has only ever followed the
+   * SHA256 chain keeps everything.
+   *
+   * @asyncUnsafe
+   */
+  public async $claimPricesAfterFork(chain: 'blake2b' | 'sha256', forkTime: number, forkHeight: number): Promise<void> {
+    const code = chain === 'blake2b' ? 1 : 2;
+    const [rows]: any = await DB.query(`SELECT number FROM state WHERE name = 'prices_chain'`);
+    const owner = rows?.[0]?.number ?? null;
+    if (owner === code) {
+      return;
+    }
+    if (owner !== null || chain === 'blake2b') {
+      const [result]: any = await DB.query(`DELETE FROM prices WHERE UNIX_TIMESTAMP(time) >= ?`, [forkTime]);
+      logger.notice(`Deleted ${result?.affectedRows ?? 0} prices recorded after the fork for the other chain`, logger.tags.mining);
+      // Blocks are linked to a price once and never looked at again, so the
+      // links into what was just deleted go too, to be made again.
+      await DB.query(`DELETE FROM blocks_prices WHERE height >= ?`, [forkHeight]);
+    }
+    await DB.query(`INSERT INTO state (name, number) VALUES ('prices_chain', ?) ON DUPLICATE KEY UPDATE number = ?`, [code, code]);
   }
 
   public async $saveAdditionalCurrencyPrices(time: number, prices: ApiPrice, legacyCurrencies: string[]): Promise<void> {
