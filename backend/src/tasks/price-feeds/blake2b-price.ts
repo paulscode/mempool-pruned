@@ -97,24 +97,35 @@ export async function $fetchBtcb2Prices(currencies: string[]): Promise<{ [curren
 }
 
 /**
- * Hourly BTCB2 dollar prices from Neoxa's candles: each hour's close, keyed by the
- * hour's start, which is how the Kraken history is keyed too. Oldest first.
+ * Less than this much BTCB2 traded in an hour is not a price. The pair's first
+ * hours on 2026-09-01 were dust trades at bitcoin-like prices (0.00003 BTCB2 at
+ * $78,201, 0.0003 at $68,000) before the market found its level near $100; a
+ * real hour moves tens of BTCB2.
  */
-export function btcb2HourlyCloses(response: any): { time: number, open: number, close: number }[] {
+export const MIN_CANDLE_VOLUME = 0.01;
+
+/**
+ * Hourly BTCB2 dollar prices from Neoxa's candles: each finished hour's close,
+ * keyed by the hour's start, which is how the Kraken history is keyed too.
+ * Oldest first. The hour still in progress is left to the live price.
+ */
+export function btcb2HourlyCloses(response: any, now: number = Date.now() / 1000): { time: number, close: number }[] {
   const candles = Array.isArray(response?.candles) ? response.candles : [];
-  const out: { time: number, open: number, close: number }[] = [];
+  const out: { time: number, close: number }[] = [];
   for (const candle of candles) {
     const time = Number(candle?.time);
-    const open = validPrice(candle?.open);
     const close = validPrice(candle?.close);
-    if (Number.isInteger(time) && time > 0 && open !== null && close !== null) {
-      out.push({ time, open: Math.round(open * 100) / 100, close: Math.round(close * 100) / 100 });
+    const volume = Number(candle?.volume);
+    if (!Number.isInteger(time) || time <= 0 || time + 3600 > now || close === null ||
+      !Number.isFinite(volume) || volume < MIN_CANDLE_VOLUME) {
+      continue;
     }
+    out.push({ time, close: Math.round(close * 100) / 100 });
   }
   return out.sort((a, b) => a.time - b.time);
 }
 
 /** @asyncUnsafe */
-export async function $fetchBtcb2HourlyCloses(): Promise<{ time: number, open: number, close: number }[]> {
+export async function $fetchBtcb2HourlyCloses(): Promise<{ time: number, close: number }[]> {
   return btcb2HourlyCloses(await query(NEOXA_CANDLES_URL));
 }

@@ -238,7 +238,7 @@ class PriceUpdater {
    * BTCB2 dollar prices from Neoxa's hourly candles, for the hours not recorded
    * yet. Only dollars are stored: the explorer converts a missing currency from
    * dollars at the current rate, which is better than inventing a past exchange
-   * rate. The fork itself gets the first traded price, so that a transaction
+   * rate. The fork itself gets the first real hour's price, so that a transaction
    * between the fork and the listing is valued at what BTCB2 first traded at,
    * not at the price of a coin it had stopped being.
    *
@@ -255,7 +255,7 @@ class PriceUpdater {
       .filter(c => c.time >= this.forkTime)
       .map(c => ({ time: c.time, usd: c.close }));
     if (closes[0].time > this.forkTime) {
-      rows.unshift({ time: this.forkTime, usd: closes[0].open });
+      rows.unshift({ time: this.forkTime, usd: closes[0].close });
     }
     let inserted = 0;
     for (const row of rows) {

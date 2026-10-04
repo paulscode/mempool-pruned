@@ -30,16 +30,18 @@ describe('BTCB2 prices', () => {
     expect(btcb2Prices(440, undefined, ['USD', 'EUR'])).toEqual({ USD: 440, EUR: -1 });
   });
 
-  test('candles become hourly closes, oldest first, skipping unusable ones', () => {
+  test('candles become finished hours\' closes, oldest first, skipping dust and the open hour', () => {
     const closes = btcb2HourlyCloses({ candles: [
-      { time: 7200, open: 162, close: 160.055423 },
-      { time: 3600, open: 161, close: 162 },
-      { time: 10800, open: 0, close: 150 },
-      { time: 'x', open: 1, close: 1 },
-    ] });
+      { time: 7200, open: 162, close: 160.055423, volume: 7.03 },
+      { time: 3600, open: 161, close: 162, volume: 24.7 },
+      { time: 1800, open: 77000, close: 78201, volume: 0.000029 }, // a listing's dust trade
+      { time: 10800, open: 1, close: 0, volume: 5 },
+      { time: 14400, open: 150, close: 151, volume: 5 }, // still open at `now`
+      { time: 'x', open: 1, close: 1, volume: 5 },
+    ] }, 16000);
     expect(closes).toEqual([
-      { time: 3600, open: 161, close: 162 },
-      { time: 7200, open: 162, close: 160.06 },
+      { time: 3600, close: 162 },
+      { time: 7200, close: 160.06 },
     ]);
     expect(btcb2HourlyCloses({ success: false })).toEqual([]);
   });
