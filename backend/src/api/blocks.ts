@@ -402,7 +402,18 @@ class Blocks {
 
   private async $getBlockStats(block: IEsploraApi.Block, transactions: TransactionExtended[]): Promise<IBitcoinApi.BlockStats> {
     if (!block.stale) {
-      return bitcoinClient.getBlockStats(block.id);
+      try {
+        return await bitcoinClient.getBlockStats(block.id);
+      } catch (e) {
+        if (!(e instanceof Error && e.message.includes('pruned'))) {
+          throw e;
+        }
+        // The proxy fetches the raw block from peers; see Common.blockStatsFromRawBlock.
+        // The header is kept for every block, pruned or not, and carries the median time.
+        const raw: string = await bitcoinClient.getBlock(block.id, 0);
+        const header = await bitcoinClient.getBlockHeader(block.id, true);
+        return Common.blockStatsFromRawBlock(raw, block.height, block.id, header?.mediantime);
+      }
     }
 
     // TODO: make these match the definitions used by the RPC response

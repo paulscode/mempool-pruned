@@ -9,6 +9,7 @@ import { isPoint } from '../utils/secp256k1';
 import logger from '../logger';
 import { getVarIntLength, opcodes, parseMultisigScript } from '../utils/bitcoin-script';
 import { IEsploraApi } from './bitcoin/esplora-api.interface';
+import { IBitcoinApi } from './bitcoin/bitcoin-api.interface';
 
 // Bitcoin Core default policy settings
 const MAX_STANDARD_TX_WEIGHT = 400_000;
@@ -53,6 +54,105 @@ export class Common {
    */
   static prunedIndexingFloor(blockchainInfo: { pruned?: boolean, pruneheight?: number }): number {
     return blockchainInfo?.pruned ? (blockchainInfo.pruneheight ?? 0) : 0;
+  }
+
+  /**
+   * getblockstats for a block the node has pruned, from the raw block.
+   *
+   * getblockstats needs the block's undo data, which pruning discards, and
+   * btc-rpc-proxy fetches only `getblock` (verbosity 0 and 1) from peers, so the
+   * RPC fails for every pruned block. Block indexing reads only the coinbase and
+   * leaves everything else to this RPC, so the first pruned block in the indexing
+   * window failed the indexer, which retried every ten seconds and never reached
+   * the hashrate, difficulty or pool statistics queued behind it.
+   *
+   * Everything here matches Core's definitions and is exact (counts, sizes,
+   * weights and the output total cover non-coinbase transactions only, as Core's
+   * do), with one exception. Per-transaction fees need every input's previous
+   * output, which on a pruned node is a peer fetch per input: the cost that once
+   * left this explorer unable to keep up with the chain. So the block's total fee
+   * is taken from the coinbase (its outputs less the subsidy), which gives the
+   * average fee and fee rate exactly, and the fee-rate percentiles, minimum and
+   * maximum, and the per-transaction fee figures are that average. A pruned block
+   * therefore shows one fee rate across its range rather than a spread.
+   */
+  static blockStatsFromRawBlock(rawBlockHex: string, height: number, hash: string, mediantime?: number): IBitcoinApi.BlockStats {
+    const block = bitcoinjs.Block.fromHex(rawBlockHex);
+    const txs = block.transactions ?? [];
+    let ins = 0;
+    let outs = 0;
+    let totalOut = 0;
+    let totalSize = 0;
+    let totalWeight = 0;
+    let swtxs = 0;
+    let swtotalSize = 0;
+    let swtotalWeight = 0;
+    let minTxSize = 0;
+    let maxTxSize = 0;
+    const sizes: number[] = [];
+    txs.forEach((tx, i) => {
+      outs += tx.outs.length;
+      if (i === 0) {
+        return;
+      }
+      ins += tx.ins.length;
+      totalOut += tx.outs.reduce((acc, out) => acc + out.value, 0);
+      const size = tx.byteLength();
+      const weight = tx.weight();
+      totalSize += size;
+      totalWeight += weight;
+      sizes.push(size);
+      if (tx.hasWitnesses()) {
+        swtxs++;
+        swtotalSize += size;
+        swtotalWeight += weight;
+      }
+    });
+    sizes.sort((a, b) => a - b);
+    if (sizes.length) {
+      minTxSize = sizes[0];
+      maxTxSize = sizes[sizes.length - 1];
+    }
+
+    const halvings = Math.floor(height / 210000);
+    const subsidy = halvings >= 64 ? 0 : Math.floor(5000000000 / Math.pow(2, halvings));
+    const reward = txs.length ? txs[0].outs.reduce((acc, out) => acc + out.value, 0) : 0;
+    const totalfee = Math.max(0, reward - subsidy);
+    const nonCoinbase = Math.max(0, txs.length - 1);
+    const avgfee = nonCoinbase ? Math.floor(totalfee / nonCoinbase) : 0;
+    const avgfeerate = totalWeight ? Math.floor(totalfee * 4 / totalWeight) : 0;
+
+    return {
+      avgfee,
+      avgfeerate,
+      avgtxsize: nonCoinbase ? Math.floor(totalSize / nonCoinbase) : 0,
+      blockhash: hash,
+      feerate_percentiles: [avgfeerate, avgfeerate, avgfeerate, avgfeerate, avgfeerate],
+      height,
+      ins,
+      maxfee: avgfee,
+      maxfeerate: avgfeerate,
+      maxtxsize: maxTxSize,
+      medianfee: avgfee,
+      mediantime: mediantime ?? block.timestamp,
+      mediantxsize: sizes.length ? sizes[Math.floor(sizes.length / 2)] : 0,
+      minfee: avgfee,
+      minfeerate: avgfeerate,
+      mintxsize: minTxSize,
+      outs,
+      subsidy,
+      swtotal_size: swtotalSize,
+      swtotal_weight: swtotalWeight,
+      swtxs,
+      time: block.timestamp,
+      total_out: totalOut,
+      total_size: totalSize,
+      total_weight: totalWeight,
+      totalfee,
+      txs: txs.length,
+      utxo_increase: outs - ins,
+      utxo_size_inc: 0,
+    };
   }
 
   static isLiquid(): boolean {
