@@ -51,6 +51,15 @@ class ChainTips {
         minIndexHeight = Math.max(0, activeTipHeight - indexedBlockAmount + 1);
       }
 
+      // A stale block below the prune height is gone, and btc-rpc-proxy then asks
+      // peers for it, which do not serve stale blocks (nor, for a node on one of
+      // the two mainnet chains, the other chain's, whose headers it still sees).
+      // Each such fetch hangs until the RPC timeout, on every new block, and the
+      // block updater waits for it. Nothing below that height can be read, so it
+      // is not asked for.
+      const blockchainInfo = await bitcoinClient.getBlockchainInfo();
+      const prunedBelow = Common.prunedIndexingFloor(blockchainInfo);
+
       const start = Date.now();
       const breakAt = start + 10000;
       let newOrphans = 0;
@@ -60,8 +69,12 @@ class ChainTips {
         if (chain.status === 'valid-fork' || chain.status === 'valid-headers') {
           const orphans: OrphanedBlock[] = [];
           let hash = chain.hash;
+          let height = chain.height;
           do {
             let orphan = this.blockCache[hash];
+            if (!orphan && height < prunedBelow) {
+              break;
+            }
             if (!orphan) {
               const block = await bitcoinCoreApi.$getBlock(hash);
               if (block && block.stale) {
@@ -98,6 +111,7 @@ class ChainTips {
               orphans.push(orphan);
             }
             hash = orphan?.prevhash;
+            height--;
           } while (hash && (Date.now() < breakAt));
           for (const orphan of orphans) {
             newOrphanedBlocks[orphan.hash] = orphan;
